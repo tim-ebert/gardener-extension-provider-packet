@@ -16,17 +16,18 @@ package terraformer
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
-	kutil "github.com/gardener/gardener/pkg/utils/kubernetes"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	kutil "github.com/gardener/gardener/pkg/utils/kubernetes"
 )
 
 const (
@@ -41,8 +42,25 @@ const (
 )
 
 // SetVariablesEnvironment sets the provided <tfvarsEnvironment> on the Terraformer object.
+// Deprecated: use SetEnvVars instead
 func (t *terraformer) SetVariablesEnvironment(tfvarsEnvironment map[string]string) Terraformer {
-	t.variablesEnvironment = tfvarsEnvironment
+	var envVars []corev1.EnvVar
+	for k, v := range tfvarsEnvironment {
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
+	}
+
+	// maps are unsorted, sort resulting slice after looping over map to avoid flickering results
+	sort.SliceStable(envVars, func(i, j int) bool {
+		return envVars[i].Name < envVars[j].Name
+	})
+
+	t.envVars = append(t.envVars, envVars...)
+	return t
+}
+
+// SetEnvVars sets the provided environment variables for the Terraformer Pod.
+func (t *terraformer) SetEnvVars(envVars ...corev1.EnvVar) Terraformer {
+	t.envVars = append(t.envVars, envVars...)
 	return t
 }
 
@@ -61,6 +79,18 @@ func (t *terraformer) SetDeadlineCleaning(d time.Duration) Terraformer {
 // SetDeadlinePod configures the deadline while waiting for the Terraformer apply/destroy pod.
 func (t *terraformer) SetDeadlinePod(d time.Duration) Terraformer {
 	t.deadlinePod = d
+	return t
+}
+
+// UseV2 configures if it should use flags compatible with terraformer@v2.
+func (t *terraformer) UseV2(v2 bool) Terraformer {
+	t.useV2 = v2
+	return t
+}
+
+// SetLogLevel sets the log level of the Terraformer pod. It only takes effect when UseV2 is set to true.
+func (t *terraformer) SetLogLevel(level string) Terraformer {
+	t.logLevel = level
 	return t
 }
 
@@ -175,10 +205,6 @@ func (t *terraformer) prepare(ctx context.Context) (int, error) {
 	numberOfExistingResources, err := t.NumberOfResources(ctx)
 	if err != nil {
 		return -1, err
-	}
-
-	if t.variablesEnvironment == nil {
-		return -1, errors.New("no Terraform variables environment provided")
 	}
 
 	// Clean up possible existing pod artifacts from previous runs
